@@ -31,6 +31,8 @@ WORKSHEET = os.getenv("WORKSHEET", "").strip()
 STATUS_NEW = "новый"
 STATUS_SENT = "отправлено"
 STATUS_ERROR = "ошибка"
+STATUS_IN_PROGRESS = "в работе"
+STATUS_NO_PUSH_CHANNEL = "нет push-канала"
 
 # Номера колонок (1-based): B, C, D, E.
 COL_NAME, COL_PHONE, COL_TEXT, COL_STATUS = 2, 3, 4, 5

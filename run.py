@@ -22,7 +22,7 @@ from playwright.sync_api import sync_playwright
 
 import sheets
 import simple_run as sr
-from utils import first_line
+from utils import first_line, NoPushChannel
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
 
@@ -35,6 +35,11 @@ def handle_row(page, ws, row, processed):
         if not phone:
             sheets.update_status(row["row"], f"{sheets.STATUS_ERROR}: пустой телефон", ws)
             return
+        if not sr.DRY_RUN:
+            # Идемпотентность: если упадём между отправкой и записью статуса,
+            # строка останется «в работе» и не уйдёт в повторную обработку
+            # (read_new_rows берёт только статус «новый»).
+            sheets.update_status(row["row"], sheets.STATUS_IN_PROGRESS, ws)
         sr.process_one(page, row["name"], phone, row["text"])
         if sr.DRY_RUN:
             logger.warning("Строка {}: DRY_RUN=true — статус в таблицу не пишу.", row["row"])
@@ -42,6 +47,9 @@ def handle_row(page, ws, row, processed):
         else:
             sheets.update_status(row["row"], sheets.STATUS_SENT, ws)
             logger.success("Строка {}: {}", row["row"], sheets.STATUS_SENT)
+    except NoPushChannel as e:
+        sheets.update_status(row["row"], sheets.STATUS_NO_PUSH_CHANNEL, ws)
+        logger.warning("Строка {}: {} — {}", row["row"], sheets.STATUS_NO_PUSH_CHANNEL, first_line(e))
     except Exception as e:
         err = first_line(e)
         sheets.update_status(row["row"], f"{sheets.STATUS_ERROR}: {err}", ws)
@@ -60,6 +68,16 @@ def main():
             sr.ensure_logged_in(page)
             while True:
                 try:
+                    sr.goto_with_retry(page, sr.BASE_PAGE_URL)
+                    if not sr.is_on_client_base(page):
+                        if sr.HEADLESS:
+                            logger.warning(
+                                "СЕССИЯ YCLIENTS ИСТЕКЛА — нужен ручной перелогин в persistent-профиль."
+                            )
+                            time.sleep(POLL_INTERVAL)
+                            continue
+                        sr.ensure_logged_in(page)
+
                     rows = [r for r in sheets.read_new_rows(ws) if r["row"] not in processed]
                     if rows:
                         logger.info("Новых строк к обработке: {}", len(rows))
