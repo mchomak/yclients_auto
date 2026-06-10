@@ -107,7 +107,9 @@ def ensure_logged_in(page):
 def search(page, query: str):
     """Ввести запрос в строку поиска и нажать «Найти»."""
     logger.info("Поиск: {}", query)
-    box = page.get_by_placeholder(re.compile("Поиск", re.I))
+    box = page.locator('[data-locator="search_input"]')
+    if box.count() == 0:
+        box = page.get_by_placeholder(re.compile("Поиск", re.I))
     box.first.fill(query)
     try:
         click_label_or_button(page, "Найти", timeout=8000)
@@ -120,16 +122,27 @@ def search(page, query: str):
         pass
 
 
+def _matched_row(page, phone: str):
+    """Locator строки результата, чей телефон совпал по phones_match (иначе None).
+
+    Строки клиентской базы — это `.v-row[data-locator^="client_tr_<id>"]`, ячейка
+    телефона внутри — `[data-locator="phone"]` (текст вида «+7 926 954-91-97»).
+    Сравниваем по phones_match, затем поднимаемся к строке-предку client_tr_.
+    (НЕ использовать `tr` — на странице есть скрытые календари-датапикеры.)"""
+    cells = page.locator('[data-locator="phone"]')
+    for i in range(cells.count()):
+        cell = cells.nth(i)
+        if phones_match(phone, cell.inner_text()):
+            row = cell.locator('xpath=ancestor::*[starts-with(@data-locator,"client_tr_")][1]')
+            if row.count() > 0:
+                return row
+    return None
+
+
 def client_exists(page, phone: str) -> bool:
-    """Есть ли в результатах поиска строка с этим телефоном (сравнение через
-    phones_match — терпимо к форматированию/коду страны, в отличие от подстроки
-    голых цифр)."""
-    rows = page.locator(".v-table__row, tr")
-    found = False
-    for i in range(rows.count()):
-        if phones_match(phone, rows.nth(i).inner_text()):
-            found = True
-            break
+    """Есть ли в результатах поиска клиент с этим телефоном (сравнение через
+    phones_match по ячейкам `[data-locator="phone"]` — терпимо к форматированию)."""
+    found = _matched_row(page, phone) is not None
     logger.info("Клиент с телефоном {} {}", phone, "найден" if found else "не найден")
     return found
 
@@ -152,10 +165,11 @@ def open_card(page, name: str, phone: str):
     """Открыть карточку клиента кликом по имени в результатах поиска."""
     logger.info("Открываю карточку клиента.")
     search(page, phone)
-    link = page.get_by_role("link", name=name)
-    if link.count() == 0:
-        link = page.get_by_text(name, exact=False)
-    link.first.click()
+    row = _matched_row(page, phone)
+    if row is None:
+        raise RuntimeError(f"Не нашёл строку клиента по телефону {phone} для открытия карточки.")
+    # Имя-ссылка в строке: <a data-locator="...edit_client_link...">.
+    row.locator('a[data-locator*="edit_client_link"]').first.click()
     page.locator('[data-locator="block_client_edit"]').wait_for(
         state="visible", timeout=15000
     )
@@ -195,16 +209,20 @@ def send_push(page, phone: str, text: str):
     is_on_client_base(page)
     search(page, phone)
 
-    # Найти ровно одну строку результатов, чей текст совпадает по phones_match.
-    rows = page.locator(".v-table__row, tr")
-    matched = [i for i in range(rows.count()) if phones_match(phone, rows.nth(i).inner_text())]
+    # Найти ровно одну ячейку телефона, совпавшую по phones_match (защита от
+    # отправки не тому клиенту), затем отметить чекбокс её строки.
+    cells = page.locator('[data-locator="phone"]')
+    matched = [i for i in range(cells.count()) if phones_match(phone, cells.nth(i).inner_text())]
     if len(matched) != 1:
         raise RuntimeError(
             f"Не удалось однозначно определить строку клиента по телефону {phone}: "
             f"совпадений найдено {len(matched)} (ожидалась ровно 1)."
         )
-    row = rows.nth(matched[0])
-    row.get_by_role("checkbox").first.check()
+    row = cells.nth(matched[0]).locator(
+        'xpath=ancestor::*[starts-with(@data-locator,"client_tr_")][1]'
+    )
+    # Нативный чекбокс скрыт (Quasar) — кликаем по styled-обёртке .q-checkbox.
+    row.locator(".q-checkbox").first.click()
 
     click_label_or_button(page, "Действия")
     page.get_by_text("Отправить PUSH в YPLACES", exact=True).first.click()
