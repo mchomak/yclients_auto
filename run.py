@@ -65,7 +65,11 @@ def main():
         context = sr.launch_context(p)
         page = context.pages[0] if context.pages else context.new_page()
         try:
-            sr.ensure_logged_in(page)
+            # В headless (Docker) интерактивный логин невозможен (нет stdin → input()
+            # бросит EOFError). Первичный вход — только в видимом режиме; в headless
+            # сессию проверяет и ждёт сам цикл ниже (graceful, без падения).
+            if not sr.HEADLESS:
+                sr.ensure_logged_in(page)
             while True:
                 try:
                     sr.goto_with_retry(page, sr.BASE_PAGE_URL)
