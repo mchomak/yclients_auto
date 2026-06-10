@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from utils import normalize_phone, phones_match
+from utils import normalize_phone, phones_match, parse_recipient_count, NoPushChannel
 
 ROOT = Path(__file__).parent
 PROFILE_DIR = ROOT / "browser_profile"
@@ -121,8 +121,15 @@ def search(page, query: str):
 
 
 def client_exists(page, phone: str) -> bool:
-    """Грубая проверка: есть ли в результатах строка с этим телефоном."""
-    found = page.get_by_text(phone, exact=False).count() > 0
+    """Есть ли в результатах поиска строка с этим телефоном (сравнение через
+    phones_match — терпимо к форматированию/коду страны, в отличие от подстроки
+    голых цифр)."""
+    rows = page.locator(".v-table__row, tr")
+    found = False
+    for i in range(rows.count()):
+        if phones_match(phone, rows.nth(i).inner_text()):
+            found = True
+            break
     logger.info("Клиент с телефоном {} {}", phone, "найден" if found else "не найден")
     return found
 
@@ -181,21 +188,23 @@ def set_consents_and_save(page):
 
 
 def send_push(page, phone: str, text: str):
-    """Поиск → чекбокс строки → Действия → «Отправить PUSH в YPLACES» → текст → Отправить."""
+    """Поиск → чекбокс строки нужного клиента → Действия → «Отправить PUSH в YPLACES»
+    → текст → проверка получателей → Отправить."""
     logger.info("Готовлю отправку push.")
     goto_with_retry(page, BASE_PAGE_URL)
     is_on_client_base(page)
     search(page, phone)
 
-    # Отметить чекбокс в строке клиента (Tier-2: разметка таблицы динамическая).
-    row = page.locator(
-        f"tr:has-text('{phone}'), .v-table__row:has-text('{phone}')"
-    ).first
-    try:
-        row.get_by_role("checkbox").first.check()
-    except Exception:
-        logger.warning("Не нашёл чекбокс в строке по телефону — пробую первый чекбокс в таблице.")
-        page.get_by_role("checkbox").nth(1).check()
+    # Найти ровно одну строку результатов, чей текст совпадает по phones_match.
+    rows = page.locator(".v-table__row, tr")
+    matched = [i for i in range(rows.count()) if phones_match(phone, rows.nth(i).inner_text())]
+    if len(matched) != 1:
+        raise RuntimeError(
+            f"Не удалось однозначно определить строку клиента по телефону {phone}: "
+            f"совпадений найдено {len(matched)} (ожидалась ровно 1)."
+        )
+    row = rows.nth(matched[0])
+    row.get_by_role("checkbox").first.check()
 
     click_label_or_button(page, "Действия")
     page.get_by_text("Отправить PUSH в YPLACES", exact=True).first.click()
@@ -203,6 +212,18 @@ def send_push(page, phone: str, text: str):
     area = page.locator("textarea.clients-base-table-yplaces-push-form__message")
     area.wait_for(state="visible", timeout=15000)
     area.fill(text)
+
+    # Проверить счётчик получателей до отправки.
+    info = page.locator(".clients-base-table-yplaces-push-form__title-info")
+    n = None
+    try:
+        n = parse_recipient_count(info.first.inner_text())
+    except Exception:
+        logger.warning("Не удалось прочитать счётчик получателей.")
+    if n is None:
+        logger.warning("Не удалось распарсить число получателей из счётчика.")
+    elif n == 0:
+        raise NoPushChannel(f"Получателей push: 0 (телефон {phone}) — слать некому.")
 
     if DRY_RUN:
         logger.warning(
@@ -219,6 +240,19 @@ def send_push(page, phone: str, text: str):
     if send_btn.count() == 0:
         send_btn = form.locator("button.y-button__type-orange")
     send_btn.first.click()
+
+    # Дождаться сигнала завершения отправки: появление .loading-message и/или
+    # скрытие/детач формы. По таймауту — ошибка (не логировать успех вслепую).
+    try:
+        page.locator(".loading-message").wait_for(state="visible", timeout=15000)
+    except PWTimeout:
+        try:
+            form.wait_for(state="hidden", timeout=15000)
+        except PWTimeout:
+            raise RuntimeError(
+                "Не дождался подтверждения отправки push (нет .loading-message и форма не скрылась)."
+            )
+
     logger.success("Push отправлен.")
 
 

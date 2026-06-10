@@ -11,7 +11,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from utils import first_line, normalize_phone, phones_match
+from utils import first_line, normalize_phone, parse_recipient_count, phones_match
 
 
 class TestNormalizePhone(unittest.TestCase):
@@ -54,6 +54,22 @@ class TestFirstLine(unittest.TestCase):
         result = first_line(long_line)
         self.assertEqual(len(result), 200)
         self.assertEqual(result, "x" * 200)
+
+
+class TestParseRecipientCount(unittest.TestCase):
+    def test_zero_recipients(self):
+        self.assertEqual(
+            parse_recipient_count("Клиентов из списка, установивших мобильное приложение -  0"), 0
+        )
+
+    def test_will_be_sent_to_n(self):
+        self.assertEqual(parse_recipient_count("Будет отправлено 5 клиентам"), 5)
+
+    def test_no_digits(self):
+        self.assertIsNone(parse_recipient_count("без цифр"))
+
+    def test_empty_string(self):
+        self.assertIsNone(parse_recipient_count(""))
 
 
 if __name__ == "__main__":

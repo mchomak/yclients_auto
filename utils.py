@@ -28,3 +28,16 @@ def first_line(err) -> str:
     """Первая строка сообщения об ошибке, безопасно (никогда не IndexError),
     усечённая до 200 символов."""
     return (str(err).splitlines() or [""])[0][:200]
+
+
+def parse_recipient_count(text: str) -> int | None:
+    """Вернуть последнее целое число в строке (счётчик получателей push),
+    или None, если цифр нет."""
+    matches = re.findall(r"\d+", text or "")
+    if not matches:
+        return None
+    return int(matches[-1])
+
+
+class NoPushChannel(Exception):
+    """Получателей push — 0 (слать некому)."""
