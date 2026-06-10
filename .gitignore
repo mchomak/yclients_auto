@@ -1,0 +1,21 @@
+# секреты и локальная конфигурация
+.env
+# ключи сервис-аккаунта / OAuth Google — НИКОГДА не коммитим
+service_account.json
+client_secret.json
+
+# persistent-профиль браузера (cookies/сессия YClients) — не коммитим
+browser_profile/
+
+# артефакты прогона
+error_*.png
+*.log
+
+# распакованные материалы из docx (скрины/текст) — рабочее, не в репозиторий
+_extract/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
