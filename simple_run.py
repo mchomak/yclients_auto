@@ -26,6 +26,8 @@ from dotenv import load_dotenv
 from loguru import logger
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
+from utils import normalize_phone, phones_match
+
 ROOT = Path(__file__).parent
 PROFILE_DIR = ROOT / "browser_profile"
 
@@ -43,11 +45,6 @@ BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 # Тексты чекбоксов согласия (из i18n YClients).
 CONSENT_PERSONAL = "Клиент явно дал согласие на обработку персональных данных"
 CONSENT_ADVERT = "Клиент явно дал согласие на отправку информационно-рекламной рассылки"
-
-
-def normalize_phone(raw: str) -> str:
-    """Только цифры — в таком виде телефон вводится в поле «Сотовый»."""
-    return re.sub(r"\D", "", raw or "")
 
 
 def click_label_or_button(scope, text: str, exact: bool = True, timeout: int = 15000):
@@ -72,6 +69,8 @@ def goto_with_retry(page, url: str, attempts: int = 3, timeout: int = 60000,
             last_err = e
             logger.warning("Переход не успел ({}/{}): {} — повтор...", i, attempts, url)
             page.wait_for_timeout(2000)
+    if last_err is None:
+        raise RuntimeError(f"goto_with_retry: ни одной попытки перехода (attempts={attempts}): {url}")
     raise last_err
 
 

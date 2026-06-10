@@ -22,6 +22,7 @@ from playwright.sync_api import sync_playwright
 
 import sheets
 import simple_run as sr
+from utils import first_line
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
 
@@ -42,7 +43,7 @@ def handle_row(page, ws, row, processed):
             sheets.update_status(row["row"], sheets.STATUS_SENT, ws)
             logger.success("Строка {}: {}", row["row"], sheets.STATUS_SENT)
     except Exception as e:
-        err = str(e).splitlines()[0][:200]
+        err = first_line(e)
         sheets.update_status(row["row"], f"{sheets.STATUS_ERROR}: {err}", ws)
         logger.error("Строка {}: ошибка — {}", row["row"], err)
 
@@ -67,7 +68,7 @@ def main():
                     else:
                         logger.debug("Новых строк нет.")
                 except Exception as e:
-                    logger.error("Ошибка при опросе/обработке: {}", str(e).splitlines()[0][:200])
+                    logger.error("Ошибка при опросе/обработке: {}", first_line(e))
                 time.sleep(POLL_INTERVAL)
         except KeyboardInterrupt:
             logger.info("Остановка по Ctrl+C.")
