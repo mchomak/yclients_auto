@@ -1,0 +1,16 @@
+services:
+  worker:
+    build: .
+    image: yclients-auto-worker
+    container_name: yclients-auto
+    env_file: .env
+    environment:
+      # На сервере всегда headless (окна нет). Переопределяет значение из .env.
+      HEADLESS: "true"
+    volumes:
+      # Persistent-сессия YClients: создаётся/прогревается один раз, переживает рестарты.
+      - ./browser_profile:/app/browser_profile
+      # Ключ сервис-аккаунта Google (read-only внутри контейнера).
+      - ./service_account.json:/app/service_account.json:ro
+    restart: unless-stopped
+    # Логи loguru идут в stdout/stderr → видны в `docker compose logs`.

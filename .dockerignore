@@ -1,0 +1,23 @@
+# Секреты и локальное окружение — НЕ в образ (монтируются томами в рантайме)
+.env
+service_account.json
+client_secret.json
+browser_profile/
+
+# Окружение разработки и артефакты
+.venv/
+venv/
+.git/
+__pycache__/
+*.pyc
+*.log
+error_*.png
+
+# Справочные материалы, не нужные в рантайме
+htmls/
+_extract/
+tests/
+*.docx
+*.xlsx
+*.md
+.claude/
