@@ -338,6 +338,27 @@ def client_exists(page, phone: str) -> bool:
     return found
 
 
+def _filter_active(page, query: str) -> bool:
+    """Активен ли быстрый фильтр по этому запросу — проверяем по URL (там остаётся
+    quick_search со значением запроса). Нужно, чтобы не искать повторно, когда список
+    уже отфильтрован, но и подстраховаться, если фильтр сбросился."""
+    try:
+        return query in (page.url or "")
+    except Exception:
+        return False
+
+
+def _wait_for_matched_row(page, phone: str, timeout_ms: int = 12000):
+    """Дождаться появления строки клиента с этим телефоном в отфильтрованном списке
+    (после создания клиента/сохранения карточки список перерисовывается)."""
+    for _ in range(max(1, timeout_ms // 500)):
+        row = _matched_row(page, phone)
+        if row is not None:
+            return row
+        page.wait_for_timeout(500)
+    return None
+
+
 def create_client(page, name: str, phone: str):
     """Открыть модалку «Добавить клиента», заполнить Имя+Сотовый, Сохранить."""
     logger.info("Создаю клиента: {} / {}", name, phone)
@@ -353,10 +374,14 @@ def create_client(page, name: str, phone: str):
 
 
 def open_card(page, name: str, phone: str):
-    """Открыть карточку клиента кликом по имени в результатах поиска."""
+    """Открыть карточку только что созданного клиента БЕЗ повторного поиска: после
+    создания список сам обновляется с активным фильтром, и клиент уже в нём — ждём
+    появления его строки и кликаем по имени. Повторно ищем только если фильтр сброшен."""
     logger.info("Открываю карточку клиента.")
-    search(page, phone)
-    row = _matched_row(page, phone)
+    if not _filter_active(page, phone):
+        logger.info("Фильтр по номеру сброшен — повторяю поиск.")
+        search(page, phone)
+    row = _wait_for_matched_row(page, phone)
     if row is None:
         raise RuntimeError(f"Не нашёл строку клиента по телефону {phone} для открытия карточки.")
     # Имя-ссылка в строке: <a data-locator="...edit_client_link...">.
@@ -448,9 +473,16 @@ def send_push(page, phone: str, text: str):
     """Поиск → чекбокс строки нужного клиента → Действия → «Отправить PUSH в YPLACES»
     → текст → проверка получателей → Отправить."""
     logger.info("Готовлю отправку push.")
-    goto_with_retry(page, BASE_PAGE_URL)
-    is_on_client_base(page)
-    search(page, phone)
+    # После сохранения карточки (или если клиент уже был) список остаётся
+    # отфильтрованным по номеру — не перезагружаем базу и не ищем повторно. Только
+    # страхуемся: если фильтр по URL сброшен — открываем базу и ищем заново.
+    if not _filter_active(page, phone):
+        logger.info("Фильтр по номеру не активен — открываю базу и ищу.")
+        goto_with_retry(page, BASE_PAGE_URL)
+        is_on_client_base(page)
+        search(page, phone)
+    if _wait_for_matched_row(page, phone) is None:
+        raise RuntimeError(f"Строка клиента по телефону {phone} не появилась в списке.")
 
     # Найти ровно одну ячейку телефона, совпавшую по phones_match (защита от
     # отправки не тому клиенту), затем отметить чекбокс её строки.
