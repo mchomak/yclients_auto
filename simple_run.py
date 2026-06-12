@@ -225,13 +225,28 @@ def login(page) -> bool:
         return False
 
     login_box.fill(YCLIENTS_LOGIN)
-    page.locator('input[type="password"]').first.fill(YCLIENTS_PASSWORD)
+    pwd = page.locator('input[type="password"]').first
+    pwd.fill(YCLIENTS_PASSWORD)
+    # Кнопка «Войти» — не <button>, а styled Vue-элемент; кликаем по тексту, fallback —
+    # Enter в поле пароля (форма сабмитится по Enter).
     try:
-        click_label_or_button(page, "Войти", timeout=8000)
+        page.get_by_text("Войти", exact=True).first.click(timeout=5000)
     except PWTimeout:
-        page.locator('input[type="password"]').first.press("Enter")
+        pwd.press("Enter")
 
-    # После входа вернуться на базу и проверить.
+    # Дождаться УХОДА со страницы signin — успешная авторизация редиректит на return-url
+    # (база). НЕ уходим навигацией сами, иначе прервём асинхронный логин.
+    try:
+        page.wait_for_url(lambda u: "/signin" not in u, timeout=25000)
+    except PWTimeout:
+        logger.error(
+            "После сабмита остались на signin — вход не прошёл (неверные креды / captcha?). "
+            "Состояние: {}", describe_page(page),
+        )
+        _debug_dump(page, "login_stuck_signin")
+        return False
+
+    # Авторизовались — открыть базу и проверить.
     goto_with_retry(page, BASE_PAGE_URL)
     if is_on_client_base(page):
         logger.success("Автовход успешен — клиентская база открыта.")
