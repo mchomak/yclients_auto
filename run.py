@@ -74,28 +74,31 @@ def main():
             sr.ensure_logged_in(page)
             while True:
                 try:
-                    sr.goto_with_retry(page, sr.BASE_PAGE_URL)
-                    if not sr.is_on_client_base(page):
-                        logger.warning(
-                            "Сессия не на странице базы — пробую перелогиниться. Состояние: {}",
-                            sr.describe_page(page),
-                        )
-                        if not sr.ensure_logged_in(page):
-                            logger.error("Войти не удалось — повторю через {} c.", POLL_INTERVAL)
+                    # Опрашиваем ТОЛЬКО Google-таблицу. Пока новых строк нет —
+                    # вкладку YClients не трогаем (без холостых перезагрузок: меньше
+                    # нагрузки и ниже анти-бот-риск). Сессия живёт в persistent-профиле.
+                    rows = [r for r in sheets.read_new_rows(ws) if r["row"] not in processed]
+                    if not rows:
+                        logger.debug("Новых строк нет.")
+                    else:
+                        logger.info("Новых строк к обработке: {}", len(rows))
+                        # Появились данные — только теперь идём в YClients: открыть базу,
+                        # при потерянной сессии перелогиниться, проверить аккаунт.
+                        sr.goto_with_retry(page, sr.BASE_PAGE_URL)
+                        if not sr.is_on_client_base(page):
+                            logger.warning(
+                                "Сессия не на странице базы — пробую перелогиниться. Состояние: {}",
+                                sr.describe_page(page),
+                            )
+                            if not sr.ensure_logged_in(page):
+                                logger.error("Войти не удалось — повторю через {} c.", POLL_INTERVAL)
+                                time.sleep(POLL_INTERVAL)
+                                continue
+                        if not sr.is_allowed_account(page):
                             time.sleep(POLL_INTERVAL)
                             continue
-
-                    if not sr.is_allowed_account(page):
-                        time.sleep(POLL_INTERVAL)
-                        continue
-
-                    rows = [r for r in sheets.read_new_rows(ws) if r["row"] not in processed]
-                    if rows:
-                        logger.info("Новых строк к обработке: {}", len(rows))
                         for row in rows:
                             handle_row(page, ws, row, processed)
-                    else:
-                        logger.debug("Новых строк нет.")
                 except Exception as e:
                     logger.error("Ошибка при опросе/обработке: {}", first_line(e))
                 time.sleep(POLL_INTERVAL)
