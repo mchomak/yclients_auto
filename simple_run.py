@@ -61,6 +61,10 @@ STEP_PAUSE_MS = int(os.getenv("STEP_PAUSE_MS", "0"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 NAV_RETRIES = int(os.getenv("NAV_RETRIES", "3"))
 STEP_RETRIES = int(os.getenv("STEP_RETRIES", "2"))
+# Отладка согласий: когда чекбоксы согласий не найдены, сохранить скриншот+HTML
+# карточки (по умолчанию выкл — иначе дамп писался бы на каждую строку и забивал
+# диск). Включай временно, чтобы вытащить реальный селектор согласий.
+DUMP_CONSENT_CARD = os.getenv("DUMP_CONSENT_CARD", "false").lower() in ("1", "true", "yes")
 
 BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 
@@ -516,9 +520,13 @@ def set_consents_and_save(page):
             logger.warning("  ошибка при отметке согласия ({}): {}", text, e)
 
     if not any_found:
-        # На этом аккаунте/салоне блока согласий в карточке нет — это штатно, не дампим
-        # (иначе скриншот+HTML писались бы на каждую строку и забивали диск).
+        # Блока согласий по известным селекторам в карточке нет. Обычно НЕ дампим
+        # (иначе скриншот+HTML писались бы на каждую строку и забивали диск), но при
+        # DUMP_CONSENT_CARD=true снимаем карточку — это нужно, чтобы вытащить реальный
+        # селектор согласий и починить шаг.
         logger.warning("Согласий в карточке нет — шаг пропущен, иду дальше.")
+        if DUMP_CONSENT_CARD:
+            dump_debug(page, "consents_not_found")
         return
 
     _watch_pause(page)
