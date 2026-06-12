@@ -84,6 +84,10 @@ def main():
                             continue
                         sr.ensure_logged_in(page)
 
+                    if not sr.is_allowed_account(page):
+                        time.sleep(POLL_INTERVAL)
+                        continue
+
                     rows = [r for r in sheets.read_new_rows(ws) if r["row"] not in processed]
                     if rows:
                         logger.info("Новых строк к обработке: {}", len(rows))

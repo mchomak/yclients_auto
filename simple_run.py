@@ -39,6 +39,8 @@ TEST_PHONE = os.getenv("TEST_PHONE", "")
 TEST_PUSH_TEXT = os.getenv("TEST_PUSH_TEXT", "Тест системы пушей")
 HEADLESS = os.getenv("HEADLESS", "false").lower() in ("1", "true", "yes")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+YCLIENTS_REQUIRED_ACCOUNT_TEXT = os.getenv("YCLIENTS_REQUIRED_ACCOUNT_TEXT", "").strip()
+YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = os.getenv("YCLIENTS_FORBIDDEN_ACCOUNT_TEXT", "").strip()
 
 BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 
@@ -114,6 +116,33 @@ def is_on_client_base(page) -> bool:
         return True
     except PWTimeout:
         return False
+
+
+def _visible_text_exists(page, text: str, timeout: int = 2000) -> bool:
+    try:
+        page.get_by_text(text, exact=False).first.wait_for(state="visible", timeout=timeout)
+        return True
+    except PWTimeout:
+        return False
+
+
+def is_allowed_account(page) -> bool:
+    """Проверить опциональные guard-тексты аккаунта перед обработкой строк."""
+    if YCLIENTS_FORBIDDEN_ACCOUNT_TEXT and _visible_text_exists(page, YCLIENTS_FORBIDDEN_ACCOUNT_TEXT):
+        logger.error(
+            "Открыт запрещённый YClients-профиль/аккаунт: {!r}. "
+            "Нужен ручной перелогин persistent-профиля.",
+            YCLIENTS_FORBIDDEN_ACCOUNT_TEXT,
+        )
+        return False
+    if YCLIENTS_REQUIRED_ACCOUNT_TEXT and not _visible_text_exists(page, YCLIENTS_REQUIRED_ACCOUNT_TEXT):
+        logger.error(
+            "Не найден ожидаемый текст YClients-аккаунта: {!r}. Текущее состояние: {}",
+            YCLIENTS_REQUIRED_ACCOUNT_TEXT,
+            describe_page(page),
+        )
+        return False
+    return True
 
 
 def ensure_logged_in(page):

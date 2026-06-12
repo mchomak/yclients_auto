@@ -39,6 +39,28 @@ class FakePage:
         return "Fake page"
 
 
+class FakeTextLocator:
+    def __init__(self, visible):
+        self.first = self
+        self.visible = visible
+
+    def wait_for(self, state, timeout):
+        if not self.visible:
+            raise sr.PWTimeout("missing")
+
+
+class FakeAccountPage:
+    def __init__(self, visible_texts):
+        self.visible_texts = visible_texts
+        self.url = "https://example.test/clients/base/"
+
+    def get_by_text(self, text, exact=False):
+        return FakeTextLocator(any(text in item for item in self.visible_texts))
+
+    def title(self):
+        return "Client base"
+
+
 class TestGotoWithRetry(unittest.TestCase):
     def test_resets_page_after_timeout_before_retry(self):
         page = FakePage(fail_target_times=1)
@@ -72,6 +94,34 @@ class TestGotoWithRetry(unittest.TestCase):
         )
         self.assertEqual(page.stops, 1)
         self.assertEqual(page.waits, [])
+
+
+class TestAccountGuard(unittest.TestCase):
+    def setUp(self):
+        self.required = sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT
+        self.forbidden = sr.YCLIENTS_FORBIDDEN_ACCOUNT_TEXT
+
+    def tearDown(self):
+        sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT = self.required
+        sr.YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = self.forbidden
+
+    def test_blocks_forbidden_account_text(self):
+        sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT = ""
+        sr.YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = "old@example.test"
+
+        self.assertFalse(sr.is_allowed_account(FakeAccountPage(["old@example.test"])))
+
+    def test_allows_required_account_text(self):
+        sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT = "customer"
+        sr.YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = ""
+
+        self.assertTrue(sr.is_allowed_account(FakeAccountPage(["customer dashboard"])))
+
+    def test_blocks_when_required_account_text_missing(self):
+        sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT = "customer"
+        sr.YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = ""
+
+        self.assertFalse(sr.is_allowed_account(FakeAccountPage(["other dashboard"])))
 
 
 if __name__ == "__main__":
