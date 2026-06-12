@@ -298,28 +298,6 @@ minimum the subagent can't derive itself:
 
 Add a line of genuinely out-of-note context only if needed (e.g. an environment
 quirk). Never paste the note's checklist into the prompt.
-
-## 12. Follow-ups & ClickUp (end of pipeline only)
-
-During the run, coder and tester surface out-of-scope-but-worthwhile items under a
-**"Follow-ups"** heading in their final messages — they list them, never act on
-them (§3, §9). The orchestrator collects these, plus anything captured in decision
-notes.
-
-ClickUp is the human dashboard, not an agent tracker. Per-stage progress is already
-tracked by Obsidian checkboxes and the session's own todos — do NOT mirror stage
-progress to ClickUp during the run.
-
-Only the orchestrator, and only once the pipeline ends (all stages PASS, or the run
-stops), writes to ClickUp via the ClickUp MCP server, and only:
-- a single project **status update**; and
-- **deferred / follow-up tasks** = work to be done outside this session: known
-  limitations, the follow-ups collected above, and decisions needing the human's
-  sign-off.
-
-If no ClickUp MCP is connected, put the same list at the end of the final summary
-instead.
-
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer
@@ -339,4 +317,8 @@ push.html - виджет пуш уведомления
 
 Логин: kaneevramil7@gmail.com
 Пароль: U0zpcV575JFC
+
+сервер
+ssh root@5.42.99.152
+kXoELV+Vm-e4Ut
 
