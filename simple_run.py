@@ -57,9 +57,35 @@ def click_label_or_button(scope, text: str, exact: bool = True, timeout: int = 1
     scope.get_by_text(text, exact=exact).first.click(timeout=timeout)
 
 
+def describe_page(page) -> str:
+    """Короткое состояние страницы для headless-диагностики; best-effort."""
+    url = getattr(page, "url", "<unknown>")
+    try:
+        title = page.title()
+    except Exception as e:
+        title = f"<title unavailable: {type(e).__name__}>"
+    return f"url={url!r}, title={title!r}"
+
+
+def _stop_and_reset_page(page):
+    try:
+        page.evaluate("window.stop()")
+    except Exception as e:
+        logger.debug("Не удалось остановить загрузку страницы: {}", e)
+    try:
+        page.goto("about:blank", wait_until="commit", timeout=5000)
+    except Exception as e:
+        logger.debug("Не удалось сбросить страницу на about:blank: {}", e)
+
+
 def goto_with_retry(page, url: str, attempts: int = 3, timeout: int = 60000,
-                    wait_until: str = "domcontentloaded"):
-    """Переход по URL с ретраями — YClients тяжёлый и иногда не успевает за дефолтный таймаут."""
+                    wait_until: str = "commit"):
+    """Переход по URL с ретраями.
+
+    YClients — тяжёлая SPA: готовность дальше проверяем селекторами, а не событием
+    DOMContentLoaded. Это также помогает восстановиться, если навигация зависла в
+    persistent-профиле Chromium.
+    """
     last_err = None
     for i in range(1, attempts + 1):
         try:
@@ -67,8 +93,13 @@ def goto_with_retry(page, url: str, attempts: int = 3, timeout: int = 60000,
             return
         except PWTimeout as e:
             last_err = e
-            logger.warning("Переход не успел ({}/{}): {} — повтор...", i, attempts, url)
-            page.wait_for_timeout(2000)
+            logger.warning(
+                "Переход не успел ({}/{}): {} — текущая страница: {}",
+                i, attempts, url, describe_page(page)
+            )
+            _stop_and_reset_page(page)
+            if i < attempts:
+                page.wait_for_timeout(2000)
     if last_err is None:
         raise RuntimeError(f"goto_with_retry: ни одной попытки перехода (attempts={attempts}): {url}")
     raise last_err

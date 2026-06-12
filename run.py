@@ -76,7 +76,9 @@ def main():
                     if not sr.is_on_client_base(page):
                         if sr.HEADLESS:
                             logger.warning(
-                                "СЕССИЯ YCLIENTS ИСТЕКЛА — нужен ручной перелогин в persistent-профиль."
+                                "СЕССИЯ YCLIENTS НЕ НА СТРАНИЦЕ БАЗЫ — нужен ручной перелогин/проверка аккаунта "
+                                "в persistent-профиле. Текущее состояние: {}",
+                                sr.describe_page(page),
                             )
                             time.sleep(POLL_INTERVAL)
                             continue
