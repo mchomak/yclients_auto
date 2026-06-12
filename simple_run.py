@@ -497,6 +497,10 @@ def launch_context(p):
         headless=HEADLESS,
         viewport={"width": 1440, "height": 900},
         locale="ru-RU",
+        # В Docker /dev/shm по умолчанию 64MB — тяжёлые SPA (signin, ERP) исчерпывают
+        # его и headless Chromium зависает на навигации. Пишем shm в /tmp вместо этого.
+        # --no-sandbox нужен для запуска под root в контейнере.
+        args=["--disable-dev-shm-usage", "--no-sandbox"],
     )
     context.set_default_timeout(15000)
     return context

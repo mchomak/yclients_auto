@@ -4,6 +4,8 @@ services:
     image: yclients-auto-worker
     container_name: yclients-auto
     env_file: .env
+    # Больше /dev/shm для Chromium на тяжёлых SPA (дефолтные 64MB → зависания).
+    shm_size: "1gb"
     environment:
       # На сервере всегда headless (окна нет). Переопределяет значение из .env.
       HEADLESS: "true"
