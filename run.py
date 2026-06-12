@@ -65,24 +65,23 @@ def main():
         context = sr.launch_context(p)
         page = context.pages[0] if context.pages else context.new_page()
         try:
-            # В headless (Docker) интерактивный логин невозможен (нет stdin → input()
-            # бросит EOFError). Первичный вход — только в видимом режиме; в headless
-            # сессию проверяет и ждёт сам цикл ниже (graceful, без падения).
-            if not sr.HEADLESS:
-                sr.ensure_logged_in(page)
+            # Первичный вход. ensure_logged_in сам делает автовход по кредам
+            # (YCLIENTS_LOGIN/PASSWORD) — работает и в headless. В видимом режиме при
+            # неудаче автовхода есть ручной fallback. В headless при неудаче просто
+            # вернёт False, цикл ниже повторит попытку (graceful, без падения).
+            sr.ensure_logged_in(page)
             while True:
                 try:
                     sr.goto_with_retry(page, sr.BASE_PAGE_URL)
                     if not sr.is_on_client_base(page):
-                        if sr.HEADLESS:
-                            logger.warning(
-                                "СЕССИЯ YCLIENTS НЕ НА СТРАНИЦЕ БАЗЫ — нужен ручной перелогин/проверка аккаунта "
-                                "в persistent-профиле. Текущее состояние: {}",
-                                sr.describe_page(page),
-                            )
+                        logger.warning(
+                            "Сессия не на странице базы — пробую перелогиниться. Состояние: {}",
+                            sr.describe_page(page),
+                        )
+                        if not sr.ensure_logged_in(page):
+                            logger.error("Войти не удалось — повторю через {} c.", POLL_INTERVAL)
                             time.sleep(POLL_INTERVAL)
                             continue
-                        sr.ensure_logged_in(page)
 
                     if not sr.is_allowed_account(page):
                         time.sleep(POLL_INTERVAL)

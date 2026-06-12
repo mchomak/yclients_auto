@@ -42,6 +42,9 @@ TEST_PHONE = os.getenv("TEST_PHONE", "")
 TEST_PUSH_TEXT = os.getenv("TEST_PUSH_TEXT", "Тест системы пушей")
 HEADLESS = os.getenv("HEADLESS", "false").lower() in ("1", "true", "yes")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ("1", "true", "yes")
+# Креды для автоматического входа (без них — только ручной логин в видимом режиме).
+YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN", "").strip()
+YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD", "")
 YCLIENTS_REQUIRED_ACCOUNT_TEXT = os.getenv("YCLIENTS_REQUIRED_ACCOUNT_TEXT", "").strip()
 YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = os.getenv("YCLIENTS_FORBIDDEN_ACCOUNT_TEXT", "").strip()
 
@@ -168,23 +171,91 @@ def is_allowed_account(page) -> bool:
     return True
 
 
-def ensure_logged_in(page):
-    """Открыть клиентскую базу. Если не залогинены — попросить войти вручную
-    (включая 2FA) и дождаться, пока откроется база. Сессия сохранится в профиле."""
+def login(page) -> bool:
+    """Автоматический вход по YCLIENTS_LOGIN/PASSWORD.
+
+    Открытие базы без сессии редиректит на www.yclients.com/signin/<return-url>
+    (Vue-форма email+пароль; return-url ведёт обратно на базу после входа). 2FA на
+    аккаунте нет. Возвращает True, если после входа оказались на клиентской базе."""
+    if not (YCLIENTS_LOGIN and YCLIENTS_PASSWORD):
+        logger.error("YCLIENTS_LOGIN/YCLIENTS_PASSWORD не заданы — автовход невозможен.")
+        return False
+
+    logger.info("Автовход: {}", YCLIENTS_LOGIN)
+    goto_with_retry(page, BASE_PAGE_URL)
+    if is_on_client_base(page):
+        return True
+
+    # Дождаться формы входа (поле пароля рендерится Vue с задержкой).
+    try:
+        page.locator('input[type="password"]').first.wait_for(state="visible", timeout=25000)
+    except PWTimeout:
+        logger.error("Форма входа не отрисовалась (нет поля пароля). Состояние: {}", describe_page(page))
+        _debug_dump(page, "login_no_form")
+        return False
+
+    # reCAPTCHA блокирует автовход — честно об этом сообщаем (нужен ручной вход).
+    rc = page.locator('iframe[src*="recaptcha"]')
+    if rc.count() and rc.first.is_visible():
+        logger.error("На входе показана reCAPTCHA — автовход невозможен, нужен ручной вход.")
+        _debug_dump(page, "login_captcha")
+        return False
+
+    # Поле логина: email / телефон / текст (берём первое видимое не-password).
+    login_box = None
+    for sel in ('input[type="email"]', 'input[name="login"]', 'input[type="tel"]', 'input[type="text"]'):
+        loc = page.locator(sel)
+        if loc.count() and loc.first.is_visible():
+            login_box = loc.first
+            break
+    if login_box is None:
+        logger.error("Поле логина не найдено на форме входа.")
+        _debug_dump(page, "login_no_login_field")
+        return False
+
+    login_box.fill(YCLIENTS_LOGIN)
+    page.locator('input[type="password"]').first.fill(YCLIENTS_PASSWORD)
+    try:
+        click_label_or_button(page, "Войти", timeout=8000)
+    except PWTimeout:
+        page.locator('input[type="password"]').first.press("Enter")
+
+    # После входа вернуться на базу и проверить.
+    goto_with_retry(page, BASE_PAGE_URL)
+    if is_on_client_base(page):
+        logger.success("Автовход успешен — клиентская база открыта.")
+        return True
+    logger.error("После автовхода база не открылась. Состояние: {}", describe_page(page))
+    _debug_dump(page, "login_failed")
+    return False
+
+
+def ensure_logged_in(page) -> bool:
+    """Гарантировать открытую клиентскую базу: сперва автовход по кредам, при неудаче
+    в видимом режиме — ручной вход. Возвращает True, если база открыта."""
     logger.info("Открываю клиентскую базу: {}", BASE_PAGE_URL)
     goto_with_retry(page, BASE_PAGE_URL)
     if is_on_client_base(page):
         logger.success("Сессия активна — уже залогинены.")
-        return
+        return True
+
+    if login(page):
+        return True
+
+    if HEADLESS:
+        logger.error("Автовход не удался (headless) — нужен ручной перелогин persistent-профиля.")
+        return False
+
     logger.warning(
-        "Похоже, требуется вход. В открытом окне браузера залогинься в YClients "
-        "(логин/пароль + 2FA, если есть), дождись клиентской базы."
+        "Автовход не удался. В открытом окне браузера залогинься в YClients вручную, "
+        "дождись клиентской базы."
     )
     input(">>> После входа нажми Enter здесь, чтобы продолжить... ")
     goto_with_retry(page, BASE_PAGE_URL)
     if not is_on_client_base(page):
         raise RuntimeError("Не вижу клиентскую базу после ручного входа. Прерываю.")
     logger.success("Залогинены, клиентская база открыта.")
+    return True
 
 
 def search(page, query: str):
