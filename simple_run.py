@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 from loguru import logger
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from utils import normalize_phone, phones_match, parse_recipient_count, NoPushChannel
+from utils import normalize_phone, phones_match
 
 ROOT = Path(__file__).parent
 PROFILE_DIR = ROOT / "browser_profile"
@@ -523,19 +523,14 @@ def send_push(page, phone: str, text: str):
     area.wait_for(state="visible", timeout=15000)
     area.fill(text)
 
-    # Проверить счётчик получателей до отправки.
+    # Счётчик получателей — только для лога; отправку НЕ блокируем. Бот всегда жмёт
+    # «Отправить», даже если получателей 0 (нет приложения) — YClients сам решает,
+    # кому доставить. Это поведение по требованию: не обращать внимание на счётчик.
     info = page.locator(".clients-base-table-yplaces-push-form__title-info")
-    n = None
     try:
-        raw = info.first.inner_text()
-        logger.debug("DEBUG счётчик получателей (сырой текст): {!r}", raw)
-        n = parse_recipient_count(raw)
+        logger.info("Счётчик получателей: {!r}", info.first.inner_text())
     except Exception:
-        logger.warning("Не удалось прочитать счётчик получателей.")
-    if n is None:
-        logger.warning("Не удалось распарсить число получателей из счётчика.")
-    elif n == 0:
-        raise NoPushChannel(f"Получателей push: 0 (телефон {phone}) — слать некому.")
+        logger.debug("Счётчик получателей не прочитан.")
 
     if DRY_RUN:
         logger.warning(
