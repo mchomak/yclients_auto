@@ -44,9 +44,15 @@ YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = os.getenv("YCLIENTS_FORBIDDEN_ACCOUNT_TEXT", "
 
 BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 
-# Тексты чекбоксов согласия (из i18n YClients).
+# Чекбоксы согласия в карточке клиента (Bootstrap-модалка block_client_edit).
+# Это настоящие <input type="checkbox"> со стабильными data-locator — кликаем по
+# ним напрямую, а не по тексту label (текст с хвостовыми пробелами не находился).
 CONSENT_PERSONAL = "Клиент явно дал согласие на обработку персональных данных"
 CONSENT_ADVERT = "Клиент явно дал согласие на отправку информационно-рекламной рассылки"
+CONSENTS = (
+    (CONSENT_PERSONAL, "is_personal_data_processing_allowed_checkbox"),
+    (CONSENT_ADVERT, "is_newsletter_allowed_checkbox"),
+)
 
 
 def click_label_or_button(scope, text: str, exact: bool = True, timeout: int = 15000):
@@ -236,19 +242,23 @@ def open_card(page, name: str, phone: str):
 
 
 def set_consents_and_save(page):
-    """Отметить 2 чекбокса согласий и сохранить карточку — best-effort.
-    Если блока согласий в карточке нет (не на всех аккаунтах он есть) — пропускаем шаг."""
-    logger.info("Проставляю согласия (если есть в карточке).")
+    """Отметить 2 чекбокса согласий по их data-locator и сохранить карточку.
+    Чекбоксы — настоящие <input type="checkbox">, .check() идемпотентен (повторно
+    не снимает галку). Если блока согласий в карточке нет — пропускаем шаг."""
+    logger.info("Проставляю согласия в карточке клиента.")
     card = page.locator('[data-locator="block_client_edit"]')
     changed = False
-    for text in (CONSENT_PERSONAL, CONSENT_ADVERT):
-        label = page.get_by_text(text, exact=False).first
+    for text, locator in CONSENTS:
+        box = card.locator(f'[data-locator="{locator}"]')
         try:
-            label.wait_for(state="visible", timeout=3000)
-            label.scroll_into_view_if_needed()
-            label.click()
+            box.wait_for(state="visible", timeout=3000)
+            box.scroll_into_view_if_needed()
+            if box.is_checked():
+                logger.info("  согласие уже стоит: {}", text)
+            else:
+                box.check()
+                logger.success("  согласие проставлено: {}", text)
             changed = True
-            logger.info("  отмечено: {}", text)
         except PWTimeout:
             logger.warning("  чекбокс согласия не найден — пропускаю: {}", text)
     if not changed:
@@ -256,9 +266,16 @@ def set_consents_and_save(page):
         return
     try:
         card.locator("button.card_save").click(timeout=5000)
-        logger.success("Карточка сохранена с согласиями.")
     except PWTimeout:
         logger.warning("Кнопка «Сохранить» в карточке не найдена — пропускаю сохранение.")
+        return
+    # Карточка-модалка должна закрыться после сохранения. Если не закрыть её,
+    # следующий шаг (клик по чекбоксу строки в базе) падает по таймауту.
+    try:
+        card.wait_for(state="hidden", timeout=15000)
+        logger.success("Карточка сохранена с согласиями.")
+    except PWTimeout:
+        logger.warning("Карточка не закрылась после сохранения — проверь вручную.")
 
 
 def send_push(page, phone: str, text: str):
