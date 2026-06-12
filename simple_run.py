@@ -30,6 +30,9 @@ from utils import normalize_phone, phones_match, parse_recipient_count, NoPushCh
 
 ROOT = Path(__file__).parent
 PROFILE_DIR = ROOT / "browser_profile"
+# Каталог для временных диагностических дампов (скриншот+HTML). Лежит внутри
+# browser_profile, т.к. это единственный смонтированный том — файлы видны на хосте.
+DEBUG_DIR = PROFILE_DIR / "_debug"
 
 load_dotenv(ROOT / ".env")
 BASE_URL = os.getenv("BASE_URL", "https://yclients.com").rstrip("/")
@@ -63,6 +66,20 @@ def click_label_or_button(scope, text: str, exact: bool = True, timeout: int = 1
         btn.first.click(timeout=timeout)
         return
     scope.get_by_text(text, exact=exact).first.click(timeout=timeout)
+
+
+def _debug_dump(page, tag: str):
+    """ВРЕМЕННАЯ диагностика: сохранить скриншот + HTML страницы для разбора.
+    Файлы пишутся в browser_profile/_debug/ (смонтированный том → видны на хосте)."""
+    try:
+        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+        png = DEBUG_DIR / f"debug_{tag}.png"
+        page.screenshot(path=str(png), full_page=True)
+        html = DEBUG_DIR / f"debug_{tag}.html"
+        html.write_text(page.content(), encoding="utf-8")
+        logger.debug("DEBUG дамп сохранён: {} ; {}", png, html)
+    except Exception as e:
+        logger.debug("DEBUG не удалось сохранить дамп ({}): {}", tag, e)
 
 
 def describe_page(page) -> str:
@@ -242,32 +259,64 @@ def open_card(page, name: str, phone: str):
 
 
 def set_consents_and_save(page):
-    """Отметить 2 чекбокса согласий по их data-locator и сохранить карточку.
-    Чекбоксы — настоящие <input type="checkbox">, .check() идемпотентен (повторно
-    не снимает галку). Если блока согласий в карточке нет — пропускаем шаг."""
+    """Отметить 2 чекбокса согласий в карточке клиента и сохранить.
+    Чекбоксы — настоящие <input type="checkbox"> в Bootstrap-модалке, но styled и
+    могут считаться Playwright «невидимыми», а тело модалки догружается через AJAX.
+    Поэтому ждём появления чекбокса в DOM (state=attached) и ставим галку через JS
+    (выставляем .checked + шлём input/change), минуя проверки видимости."""
     logger.info("Проставляю согласия в карточке клиента.")
     card = page.locator('[data-locator="block_client_edit"]')
-    changed = False
+    try:
+        logger.debug("DEBUG модалка block_client_edit: count={}, visible={}",
+                     card.count(), card.first.is_visible() if card.count() else False)
+    except Exception as e:
+        logger.debug("DEBUG оценка модалки не удалась: {}", e)
+
+    any_found = False
     for text, locator in CONSENTS:
-        box = card.locator(f'[data-locator="{locator}"]')
+        sel = f'[data-locator="{locator}"]'
         try:
-            box.wait_for(state="visible", timeout=3000)
-            box.scroll_into_view_if_needed()
-            if box.is_checked():
-                logger.info("  согласие уже стоит: {}", text)
-            else:
-                box.check()
-                logger.success("  согласие проставлено: {}", text)
-            changed = True
+            page.locator(sel).first.wait_for(state="attached", timeout=8000)
         except PWTimeout:
-            logger.warning("  чекбокс согласия не найден — пропускаю: {}", text)
-    if not changed:
+            logger.warning("  чекбокс согласия не найден в DOM — пропускаю: {}", text)
+            continue
+        res = page.evaluate(
+            """(sel) => {
+                const els = Array.from(document.querySelectorAll(sel));
+                // предпочесть чекбокс внутри показанной модалки, иначе первый в DOM
+                const el = els.find(e => {
+                    const m = e.closest('.modal');
+                    return m && getComputedStyle(m).display !== 'none';
+                }) || els[0];
+                if (!el) return {found: false, total: els.length};
+                const before = el.checked;
+                if (!el.checked) {
+                    el.checked = true;
+                    el.dispatchEvent(new Event('input',  {bubbles: true}));
+                    el.dispatchEvent(new Event('change', {bubbles: true}));
+                }
+                const vis = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                return {found: true, total: els.length, before, after: el.checked, visible: vis};
+            }""", sel)
+        logger.debug("DEBUG чекбокс {}: {}", locator, res)
+        if not res.get("found"):
+            logger.warning("  чекбокс согласия не найден в DOM — пропускаю: {}", text)
+            continue
+        any_found = True
+        if res.get("before"):
+            logger.info("  согласие уже стояло: {}", text)
+        else:
+            logger.success("  согласие проставлено: {}", text)
+
+    if not any_found:
         logger.warning("Согласий в карточке нет — шаг пропущен, иду дальше.")
+        _debug_dump(page, "consents_not_found")
         return
     try:
         card.locator("button.card_save").click(timeout=5000)
     except PWTimeout:
         logger.warning("Кнопка «Сохранить» в карточке не найдена — пропускаю сохранение.")
+        _debug_dump(page, "card_save_not_found")
         return
     # Карточка-модалка должна закрыться после сохранения. Если не закрыть её,
     # следующий шаг (клик по чекбоксу строки в базе) падает по таймауту.
@@ -299,10 +348,27 @@ def send_push(page, phone: str, text: str):
         'xpath=ancestor::*[starts-with(@data-locator,"client_tr_")][1]'
     )
     # Нативный чекбокс скрыт (Quasar) — кликаем по styled-обёртке .q-checkbox.
-    row.locator(".q-checkbox").first.click()
+    cb = row.locator(".q-checkbox").first
+    logger.debug("DEBUG строка клиента: q-checkbox count={}", row.locator(".q-checkbox").count())
+    cb.click()
+    # Проверить, что строка реально выделилась — иначе у push будет 0 получателей.
+    try:
+        logger.debug("DEBUG q-checkbox после клика: aria-checked={}", cb.get_attribute("aria-checked"))
+    except Exception as e:
+        logger.debug("DEBUG не удалось прочитать состояние q-checkbox: {}", e)
 
-    click_label_or_button(page, "Действия")
-    page.get_by_text("Отправить PUSH в YPLACES", exact=True).first.click()
+    try:
+        click_label_or_button(page, "Действия")
+    except PWTimeout:
+        logger.error("Кнопка «Действия» не найдена.")
+        _debug_dump(page, "actions_not_found")
+        raise
+    try:
+        page.get_by_text("Отправить PUSH в YPLACES", exact=True).first.click(timeout=8000)
+    except PWTimeout:
+        logger.error("Пункт «Отправить PUSH в YPLACES» не найден в меню «Действия».")
+        _debug_dump(page, "push_item_not_found")
+        raise
 
     area = page.locator("textarea.clients-base-table-yplaces-push-form__message")
     area.wait_for(state="visible", timeout=15000)
@@ -312,7 +378,9 @@ def send_push(page, phone: str, text: str):
     info = page.locator(".clients-base-table-yplaces-push-form__title-info")
     n = None
     try:
-        n = parse_recipient_count(info.first.inner_text())
+        raw = info.first.inner_text()
+        logger.debug("DEBUG счётчик получателей (сырой текст): {!r}", raw)
+        n = parse_recipient_count(raw)
     except Exception:
         logger.warning("Не удалось прочитать счётчик получателей.")
     if n is None:
