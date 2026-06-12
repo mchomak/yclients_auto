@@ -5,9 +5,17 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import simple_run as sr
+import run
 
 
 TARGET_URL = "https://example.test/clients/base/"
+
+
+class TestWatchdogHeartbeat(unittest.TestCase):
+    def test_beat_advances_timestamp(self):
+        run._last_beat = 0.0
+        run._beat()
+        self.assertGreater(run._last_beat, 0.0)
 
 
 class FakePage:

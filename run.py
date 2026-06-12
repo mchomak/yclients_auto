@@ -15,6 +15,7 @@
 """
 
 import os
+import threading
 import time
 
 from loguru import logger
@@ -25,6 +26,37 @@ import simple_run as sr
 from utils import first_line, NoPushChannel
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "60"))
+# Watchdog: если основной цикл не «отметился» (heartbeat) дольше WATCHDOG_TIMEOUT
+# секунд — значит он завис (например, зависший рендерер Chromium, который не
+# пробивается даже таймаутом Playwright). Тогда принудительно завершаем процесс, и
+# Docker (restart: unless-stopped) поднимает контейнер заново. Строки в безопасности:
+# статус «новый» не сменился → переобработка идемпотентна (сначала ищем, потом создаём).
+WATCHDOG_TIMEOUT = int(os.getenv("WATCHDOG_TIMEOUT", "240"))
+
+_last_beat = time.time()
+
+
+def _beat():
+    """Отметка прогресса основного цикла для watchdog'а."""
+    global _last_beat
+    _last_beat = time.time()
+
+
+def _start_watchdog():
+    """Демон-поток: если цикл завис дольше WATCHDOG_TIMEOUT — убить процесс (os._exit),
+    чтобы Docker перезапустил контейнер. os._exit бьёт мгновенно, где бы ни завис
+    основной поток (в т.ч. внутри зависшего вызова Playwright)."""
+    def _watch():
+        while True:
+            time.sleep(30)
+            stalled = time.time() - _last_beat
+            if stalled > WATCHDOG_TIMEOUT:
+                logger.error(
+                    "Watchdog: цикл завис на {:.0f} c (>{} c) — принудительный перезапуск процесса.",
+                    stalled, WATCHDOG_TIMEOUT,
+                )
+                os._exit(1)
+    threading.Thread(target=_watch, daemon=True, name="watchdog").start()
 
 
 def handle_row(page, ws, row, processed):
@@ -72,8 +104,10 @@ def main():
             # неудаче автовхода есть ручной fallback. В headless при неудаче просто
             # вернёт False, цикл ниже повторит попытку (graceful, без падения).
             sr.ensure_logged_in(page)
+            _start_watchdog()
             while True:
                 try:
+                    _beat()
                     # Опрашиваем ТОЛЬКО Google-таблицу. Пока новых строк нет —
                     # вкладку YClients не трогаем (без холостых перезагрузок: меньше
                     # нагрузки и ниже анти-бот-риск). Сессия живёт в persistent-профиле.
@@ -98,6 +132,7 @@ def main():
                             time.sleep(POLL_INTERVAL)
                             continue
                         for row in rows:
+                            _beat()  # каждая строка отодвигает watchdog (батч не ложно убьётся)
                             handle_row(page, ws, row, processed)
                 except Exception as e:
                     logger.error("Ошибка при опросе/обработке: {}", first_line(e))
