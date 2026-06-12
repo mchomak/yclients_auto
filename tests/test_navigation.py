@@ -96,6 +96,56 @@ class TestGotoWithRetry(unittest.TestCase):
         self.assertEqual(page.waits, [])
 
 
+class FakeRetryPage:
+    def __init__(self):
+        self.reloads = 0
+        self.waits = []
+        self.url = "about:blank"
+
+    def reload(self, wait_until, timeout):
+        self.reloads += 1
+
+    def wait_for_timeout(self, ms):
+        self.waits.append(ms)
+
+
+class TestWithPageRetry(unittest.TestCase):
+    def setUp(self):
+        # dump_debug дергает page.screenshot/content — в юнит-тесте подменяем no-op.
+        self._orig_dump = sr.dump_debug
+        sr.dump_debug = lambda page, tag: None
+
+    def tearDown(self):
+        sr.dump_debug = self._orig_dump
+
+    def test_returns_without_reload_on_success(self):
+        page = FakeRetryPage()
+        calls = []
+
+        def action():
+            calls.append(1)
+            return "ok"
+
+        self.assertEqual(sr.with_page_retry(page, action, "шаг", attempts=3), "ok")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(page.reloads, 0)
+
+    def test_retries_with_reload_then_raises(self):
+        page = FakeRetryPage()
+        calls = []
+
+        def action():
+            calls.append(1)
+            raise sr.PWTimeout("boom")
+
+        with self.assertRaises(sr.PWTimeout):
+            sr.with_page_retry(page, action, "шаг", attempts=2)
+
+        self.assertEqual(len(calls), 2)       # ровно attempts попыток
+        self.assertEqual(page.reloads, 1)     # один reload между попытками
+        self.assertEqual(page.waits, [1500])  # пауза после reload
+
+
 class TestAccountGuard(unittest.TestCase):
     def setUp(self):
         self.required = sr.YCLIENTS_REQUIRED_ACCOUNT_TEXT

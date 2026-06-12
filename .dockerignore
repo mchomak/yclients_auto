@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 *.log
 error_*.png
+logs/
 
 # Справочные материалы, не нужные в рантайме
 htmls/

@@ -15,13 +15,35 @@
 
 import os
 import re
+import time
 from pathlib import Path
 
 import gspread
 from dotenv import load_dotenv
+from loguru import logger
 
 ROOT = Path(__file__).parent
 load_dotenv(ROOT / ".env")
+
+# Сетевые вызовы к Google API изредка отдают 5xx/таймаут — повторяем с паузой,
+# чтобы один транзиентный сбой не ронял чтение/запись строки.
+SHEETS_RETRIES = int(os.getenv("SHEETS_RETRIES", "3"))
+SHEETS_RETRY_DELAY = float(os.getenv("SHEETS_RETRY_DELAY", "3"))
+
+
+def _with_retry(fn, what: str):
+    """Повторить сетевой вызов к Google API при транзиентной ошибке."""
+    last_err = None
+    for i in range(1, SHEETS_RETRIES + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last_err = e
+            logger.warning("Google Sheets: {} не удалось ({}/{}): {}",
+                           what, i, SHEETS_RETRIES, str(e).splitlines()[0][:200])
+            if i < SHEETS_RETRIES:
+                time.sleep(SHEETS_RETRY_DELAY)
+    raise last_err
 
 CRED = os.getenv("GOOGLE_CREDENTIALS", "service_account.json")
 SHEET_URL = os.getenv("SHEET_URL", "")
@@ -55,7 +77,7 @@ def get_worksheet():
 def read_new_rows(ws=None):
     """Список строк со статусом «новый»: [{row, name, phone, text}, ...]."""
     ws = ws or get_worksheet()
-    rows = ws.get_all_values()
+    rows = _with_retry(ws.get_all_values, "чтение строк")
     out = []
     for i, r in enumerate(rows, start=1):
         if i <= HEADER_ROWS:
@@ -74,7 +96,7 @@ def read_new_rows(ws=None):
 def update_status(row: int, status: str, ws=None):
     """Записать статус в колонку E указанной строки."""
     ws = ws or get_worksheet()
-    ws.update_cell(row, COL_STATUS, status)
+    _with_retry(lambda: ws.update_cell(row, COL_STATUS, status), f"запись статуса в строку {row}")
 
 
 if __name__ == "__main__":

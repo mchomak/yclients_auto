@@ -20,19 +20,23 @@ plan-01-mvp-prostoy-progon).
 import os
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 from loguru import logger
 from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
 
-from utils import normalize_phone, phones_match
+from utils import normalize_phone, phones_match, first_line
 
 ROOT = Path(__file__).parent
 PROFILE_DIR = ROOT / "browser_profile"
-# Каталог для временных диагностических дампов (скриншот+HTML). Лежит внутри
-# browser_profile, т.к. это единственный смонтированный том — файлы видны на хосте.
-DEBUG_DIR = PROFILE_DIR / "_debug"
+# Каталог логов и диагностических артефактов. Монтируется томом в docker-compose
+# (./logs:/app/logs), поэтому app.log и дампы ошибок видны на хосте и переживают
+# рестарт контейнера. Путь переопределяется через LOG_DIR.
+LOG_DIR = Path(os.getenv("LOG_DIR", str(ROOT / "logs")))
+# Скриншот+HTML страницы на каждой ошибке/ретрае — для пост-мортем разбора вёрстки.
+ARTIFACTS_DIR = LOG_DIR / "artifacts"
 
 load_dotenv(ROOT / ".env")
 BASE_URL = os.getenv("BASE_URL", "https://yclients.com").rstrip("/")
@@ -52,6 +56,11 @@ YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = os.getenv("YCLIENTS_FORBIDDEN_ACCOUNT_TEXT", "
 # паузы на ключевых шагах, чтобы успеть рассмотреть экран.
 SLOW_MO_MS = int(os.getenv("SLOW_MO_MS", "0"))
 STEP_PAUSE_MS = int(os.getenv("STEP_PAUSE_MS", "0"))
+# Уровень логов в файл/консоль и ретраи. NAV_RETRIES — попытки перехода по URL;
+# STEP_RETRIES — попытки шага с перезагрузкой страницы (поиск/создание/форма push).
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+NAV_RETRIES = int(os.getenv("NAV_RETRIES", "3"))
+STEP_RETRIES = int(os.getenv("STEP_RETRIES", "2"))
 
 BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 
@@ -76,18 +85,54 @@ def click_label_or_button(scope, text: str, exact: bool = True, timeout: int = 1
     scope.get_by_text(text, exact=exact).first.click(timeout=timeout)
 
 
-def _debug_dump(page, tag: str):
-    """ВРЕМЕННАЯ диагностика: сохранить скриншот + HTML страницы для разбора.
-    Файлы пишутся в browser_profile/_debug/ (смонтированный том → видны на хосте)."""
+def setup_logging():
+    """Настроить loguru: цветная консоль + ротируемый файл logs/app.log.
+    Вызывается из main() обоих entrypoint'ов (не при импорте — чтобы тесты,
+    импортирующие модуль, не создавали файлов)."""
+    logger.remove()
+    logger.add(sys.stderr, level=LOG_LEVEL,
+               format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | {message}")
     try:
-        DEBUG_DIR.mkdir(parents=True, exist_ok=True)
-        png = DEBUG_DIR / f"debug_{tag}.png"
-        page.screenshot(path=str(png), full_page=True)
-        html = DEBUG_DIR / f"debug_{tag}.html"
-        html.write_text(page.content(), encoding="utf-8")
-        logger.debug("DEBUG дамп сохранён: {} ; {}", png, html)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        logger.add(
+            LOG_DIR / "app.log",
+            level="DEBUG",                 # в файл пишем подробнее, чем в консоль
+            rotation="10 MB",
+            retention="14 days",
+            compression="zip",
+            encoding="utf-8",
+            enqueue=True,                  # потокобезопасно (фоновый writer)
+            backtrace=True,
+            diagnose=False,                # не печатать значения переменных (секреты!)
+        )
+        logger.info("Логи пишутся в {}", LOG_DIR / "app.log")
     except Exception as e:
-        logger.debug("DEBUG не удалось сохранить дамп ({}): {}", tag, e)
+        logger.warning("Файловое логирование не настроено ({}): {}", LOG_DIR, e)
+
+
+def dump_debug(page, tag: str):
+    """Сохранить скриншот + HTML страницы для пост-мортем разбора (вёрстка/модалки).
+    Файлы — с таймштампом в logs/artifacts/ (смонтированный том → видны на хосте,
+    история не перетирается). best-effort, никогда не роняет основной поток."""
+    if page is None:
+        return
+    safe = re.sub(r"[^0-9A-Za-zА-Яа-я_-]+", "_", tag)[:60]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    base = ARTIFACTS_DIR / f"{stamp}_{safe}"
+    try:
+        ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            page.screenshot(path=f"{base}.png", full_page=True)
+        except Exception as e:
+            logger.debug("Скриншот не сохранён ({}): {}", tag, first_line(e))
+        try:
+            Path(f"{base}.html").write_text(page.content(), encoding="utf-8")
+        except Exception as e:
+            logger.debug("HTML не сохранён ({}): {}", tag, first_line(e))
+        logger.info("Артефакты ошибки сохранены: {}.png / .html  (состояние: {})",
+                    base, describe_page(page))
+    except Exception as e:
+        logger.debug("Не удалось сохранить артефакты ({}): {}", tag, first_line(e))
 
 
 def _watch_pause(page):
@@ -117,30 +162,66 @@ def _stop_and_reset_page(page):
         logger.debug("Не удалось сбросить страницу на about:blank: {}", e)
 
 
-def goto_with_retry(page, url: str, attempts: int = 3, timeout: int = 60000,
+def goto_with_retry(page, url: str, attempts: int = NAV_RETRIES, timeout: int = 60000,
                     wait_until: str = "commit"):
     """Переход по URL с ретраями.
 
     YClients — тяжёлая SPA: готовность дальше проверяем селекторами, а не событием
     DOMContentLoaded. Это также помогает восстановиться, если навигация зависла в
-    persistent-профиле Chromium.
+    persistent-профиле Chromium. Ретраим не только таймаут, но и сетевые ошибки
+    (net::ERR_*), которые Playwright кидает как обычный Error.
     """
     last_err = None
     for i in range(1, attempts + 1):
         try:
             page.goto(url, wait_until=wait_until, timeout=timeout)
             return
-        except PWTimeout as e:
+        except Exception as e:
             last_err = e
             logger.warning(
-                "Переход не успел ({}/{}): {} — текущая страница: {}",
-                i, attempts, url, describe_page(page)
+                "Переход не успел ({}/{}): {} — {} — текущая страница: {}",
+                i, attempts, url, first_line(e), describe_page(page)
             )
             _stop_and_reset_page(page)
             if i < attempts:
                 page.wait_for_timeout(2000)
     if last_err is None:
         raise RuntimeError(f"goto_with_retry: ни одной попытки перехода (attempts={attempts}): {url}")
+    raise last_err
+
+
+def with_page_retry(page, action, what: str, attempts: int = STEP_RETRIES,
+                    reload_url: str = None):
+    """Выполнить action(); при любой ошибке сохранить артефакты, перезагрузить
+    страницу и повторить. Для шагов, где элемент мог просто не успеть прогрузиться
+    (медленная SPA, моргнувшая модалка).
+
+    ВАЖНО: оборачивать только идемпотентные/безопасные-к-повтору шаги (поиск,
+    создание-если-нет, открытие формы ДО необратимой отправки). Шаг с реальной
+    кнопкой «Отправить» сюда заворачивать нельзя — иначе риск дубля push.
+    """
+    last_err = None
+    for i in range(1, attempts + 1):
+        try:
+            return action()
+        except Exception as e:
+            last_err = e
+            logger.warning("Шаг «{}» не удался ({}/{}): {}", what, i, attempts, first_line(e))
+            dump_debug(page, f"{what}_fail_{i}")
+            if i < attempts:
+                logger.info("Перезагружаю страницу и повторяю шаг «{}».", what)
+                if reload_url:
+                    try:
+                        goto_with_retry(page, reload_url)
+                    except Exception as ne:
+                        logger.warning("Перезагрузка ({}) не удалась: {}", reload_url, first_line(ne))
+                else:
+                    try:
+                        page.reload(wait_until="commit", timeout=60000)
+                    except Exception as ne:
+                        logger.warning("page.reload не удался: {}", first_line(ne))
+                page.wait_for_timeout(1500)
+    logger.error("Шаг «{}» не удался после {} попыток.", what, attempts)
     raise last_err
 
 
@@ -202,14 +283,14 @@ def login(page) -> bool:
         page.locator('input[type="password"]').first.wait_for(state="visible", timeout=25000)
     except PWTimeout:
         logger.error("Форма входа не отрисовалась (нет поля пароля). Состояние: {}", describe_page(page))
-        _debug_dump(page, "login_no_form")
+        dump_debug(page, "login_no_form")
         return False
 
     # reCAPTCHA блокирует автовход — честно об этом сообщаем (нужен ручной вход).
     rc = page.locator('iframe[src*="recaptcha"]')
     if rc.count() and rc.first.is_visible():
         logger.error("На входе показана reCAPTCHA — автовход невозможен, нужен ручной вход.")
-        _debug_dump(page, "login_captcha")
+        dump_debug(page, "login_captcha")
         return False
 
     # Поле логина в форме signin — внутри Vue web-components (shadow DOM), причём в
@@ -232,7 +313,7 @@ def login(page) -> bool:
             continue
     if login_box is None:
         logger.error("Поле логина не найдено на форме входа.")
-        _debug_dump(page, "login_no_login_field")
+        dump_debug(page, "login_no_login_field")
         return False
 
     login_box.fill(YCLIENTS_LOGIN)
@@ -254,7 +335,7 @@ def login(page) -> bool:
             "После сабмита остались на signin — вход не прошёл (неверные креды / captcha?). "
             "Состояние: {}", describe_page(page),
         )
-        _debug_dump(page, "login_stuck_signin")
+        dump_debug(page, "login_stuck_signin")
         return False
 
     # Авторизовались — открыть базу и проверить.
@@ -263,7 +344,7 @@ def login(page) -> bool:
         logger.success("Автовход успешен — клиентская база открыта.")
         return True
     logger.error("После автовхода база не открылась. Состояние: {}", describe_page(page))
-    _debug_dump(page, "login_failed")
+    dump_debug(page, "login_failed")
     return False
 
 
@@ -450,7 +531,7 @@ def set_consents_and_save(page):
         save = card.get_by_text("Сохранить", exact=True)
     if save.count() == 0:
         logger.warning("Кнопка «Сохранить» в карточке не найдена — пропускаю сохранение.")
-        _debug_dump(page, "card_save_not_found")
+        dump_debug(page, "card_save_not_found")
         return
     try:
         save.first.scroll_into_view_if_needed()
@@ -458,7 +539,7 @@ def set_consents_and_save(page):
         save.first.click(timeout=8000)
     except Exception as e:
         logger.warning("Не удалось нажать «Сохранить»: {}", e)
-        _debug_dump(page, "card_save_click_failed")
+        dump_debug(page, "card_save_click_failed")
         return
     # Карточка-модалка должна закрыться после сохранения. Если не закрыть её,
     # следующий шаг (клик по чекбоксу строки в базе) падает по таймауту.
@@ -473,54 +554,50 @@ def send_push(page, phone: str, text: str):
     """Поиск → чекбокс строки нужного клиента → Действия → «Отправить PUSH в YPLACES»
     → текст → проверка получателей → Отправить."""
     logger.info("Готовлю отправку push.")
-    # После сохранения карточки (или если клиент уже был) список остаётся
-    # отфильтрованным по номеру — не перезагружаем базу и не ищем повторно. Только
-    # страхуемся: если фильтр по URL сброшен — открываем базу и ищем заново.
-    if not _filter_active(page, phone):
-        logger.info("Фильтр по номеру не активен — открываю базу и ищу.")
-        goto_with_retry(page, BASE_PAGE_URL)
-        is_on_client_base(page)
-        search(page, phone)
-    if _wait_for_matched_row(page, phone) is None:
-        raise RuntimeError(f"Строка клиента по телефону {phone} не появилась в списке.")
 
-    # Найти ровно одну ячейку телефона, совпавшую по phones_match (защита от
-    # отправки не тому клиенту), затем отметить чекбокс её строки.
-    cells = page.locator('[data-locator="phone"]')
-    matched = [i for i in range(cells.count()) if phones_match(phone, cells.nth(i).inner_text())]
-    if len(matched) != 1:
-        raise RuntimeError(
-            f"Не удалось однозначно определить строку клиента по телефону {phone}: "
-            f"совпадений найдено {len(matched)} (ожидалась ровно 1)."
+    def open_push_form():
+        # После сохранения карточки (или если клиент уже был) список остаётся
+        # отфильтрованным по номеру — повторно не ищем. При ретрае (страница
+        # перезагружена) фильтр по URL сброшен → ищем заново.
+        if not _filter_active(page, phone):
+            logger.info("Фильтр по номеру не активен — открываю базу и ищу.")
+            goto_with_retry(page, BASE_PAGE_URL)
+            is_on_client_base(page)
+            search(page, phone)
+        if _wait_for_matched_row(page, phone) is None:
+            raise RuntimeError(f"Строка клиента по телефону {phone} не появилась в списке.")
+
+        # Найти ровно одну ячейку телефона, совпавшую по phones_match (защита от
+        # отправки не тому клиенту), затем отметить чекбокс её строки.
+        cells = page.locator('[data-locator="phone"]')
+        matched = [i for i in range(cells.count()) if phones_match(phone, cells.nth(i).inner_text())]
+        if len(matched) != 1:
+            raise RuntimeError(
+                f"Не удалось однозначно определить строку клиента по телефону {phone}: "
+                f"совпадений найдено {len(matched)} (ожидалась ровно 1)."
+            )
+        row = cells.nth(matched[0]).locator(
+            'xpath=ancestor::*[starts-with(@data-locator,"client_tr_")][1]'
         )
-    row = cells.nth(matched[0]).locator(
-        'xpath=ancestor::*[starts-with(@data-locator,"client_tr_")][1]'
-    )
-    # Нативный чекбокс скрыт (Quasar) — кликаем по styled-обёртке .q-checkbox.
-    cb = row.locator(".q-checkbox").first
-    logger.debug("DEBUG строка клиента: q-checkbox count={}", row.locator(".q-checkbox").count())
-    cb.click()
-    # Проверить, что строка реально выделилась — иначе у push будет 0 получателей.
-    try:
-        logger.debug("DEBUG q-checkbox после клика: aria-checked={}", cb.get_attribute("aria-checked"))
-    except Exception as e:
-        logger.debug("DEBUG не удалось прочитать состояние q-checkbox: {}", e)
+        # Нативный чекбокс скрыт (Quasar) — кликаем по styled-обёртке .q-checkbox.
+        cb = row.locator(".q-checkbox").first
+        cb.click()
+        # Проверить, что строка реально выделилась — иначе у push будет 0 получателей.
+        try:
+            logger.debug("q-checkbox после клика: aria-checked={}", cb.get_attribute("aria-checked"))
+        except Exception as e:
+            logger.debug("Не удалось прочитать состояние q-checkbox: {}", e)
 
-    try:
         click_label_or_button(page, "Действия")
-    except PWTimeout:
-        logger.error("Кнопка «Действия» не найдена.")
-        _debug_dump(page, "actions_not_found")
-        raise
-    try:
         page.get_by_text("Отправить PUSH в YPLACES", exact=True).first.click(timeout=8000)
-    except PWTimeout:
-        logger.error("Пункт «Отправить PUSH в YPLACES» не найден в меню «Действия».")
-        _debug_dump(page, "push_item_not_found")
-        raise
 
-    area = page.locator("textarea.clients-base-table-yplaces-push-form__message")
-    area.wait_for(state="visible", timeout=15000)
+        area = page.locator("textarea.clients-base-table-yplaces-push-form__message")
+        area.wait_for(state="visible", timeout=15000)
+        return area
+
+    # Открытие формы безопасно повторять с перезагрузкой — это всё ДО необратимой
+    # кнопки «Отправить». Саму отправку (ниже) НЕ ретраим, чтобы не задвоить push.
+    area = with_page_retry(page, open_push_form, "форма push", reload_url=BASE_PAGE_URL)
     area.fill(text)
 
     # Счётчик получателей — только для лога; отправку НЕ блокируем. Бот всегда жмёт
@@ -583,21 +660,29 @@ def launch_context(p):
 def process_one(page, name: str, phone: str, text: str):
     """Один лид: поиск → создать при отсутствии → согласия → push.
     Используется и в одиночном прогоне, и в прогоне из Google-таблицы (run.py)."""
-    goto_with_retry(page, BASE_PAGE_URL)
-    is_on_client_base(page)
-    search(page, phone)
-    if not client_exists(page, phone):
-        create_client(page, name, phone)
-        open_card(page, name, phone)
-        _watch_pause(page)  # дать рассмотреть открытую карточку до согласий
-        set_consents_and_save(page)
-    else:
-        logger.info("Клиент уже есть — пропускаю создание (защита от дублей).")
+
+    def prepare():
+        # Идемпотентно и безопасно к повтору: всегда сначала ищем, создаём только
+        # если не нашли (защита от дублей). Поэтому весь блок можно ретраить с
+        # перезагрузкой страницы, если элементы не прогрузились.
+        goto_with_retry(page, BASE_PAGE_URL)
+        is_on_client_base(page)
+        search(page, phone)
+        if not client_exists(page, phone):
+            create_client(page, name, phone)
+            open_card(page, name, phone)
+            _watch_pause(page)  # дать рассмотреть открытую карточку до согласий
+            set_consents_and_save(page)
+        else:
+            logger.info("Клиент уже есть — пропускаю создание (защита от дублей).")
+
+    with_page_retry(page, prepare, "поиск/создание клиента")
     _watch_pause(page)
     send_push(page, phone, text)
 
 
 def main():
+    setup_logging()
     if not TEST_PHONE:
         logger.error("Не задан TEST_PHONE в .env")
         sys.exit(1)
@@ -614,12 +699,8 @@ def main():
             process_one(page, TEST_NAME, phone, TEST_PUSH_TEXT)
             logger.success("Прогон завершён успешно.")
         except Exception as e:
-            shot = ROOT / "error_run.png"
-            try:
-                page.screenshot(path=str(shot))
-                logger.error("Ошибка: {}. Скриншот: {}", e, shot)
-            except Exception:
-                logger.error("Ошибка: {} (скриншот сделать не удалось)", e)
+            logger.error("Ошибка прогона: {}", first_line(e))
+            dump_debug(page, "simple_run_error")
             input(">>> Enter — закрыть браузер... ")
             context.close()
             sys.exit(1)

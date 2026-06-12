@@ -52,11 +52,13 @@ def handle_row(page, ws, row, processed):
         logger.warning("Строка {}: {} — {}", row["row"], sheets.STATUS_NO_PUSH_CHANNEL, first_line(e))
     except Exception as e:
         err = first_line(e)
+        sr.dump_debug(page, f"row{row['row']}_error")
         sheets.update_status(row["row"], f"{sheets.STATUS_ERROR}: {err}", ws)
         logger.error("Строка {}: ошибка — {}", row["row"], err)
 
 
 def main():
+    sr.setup_logging()
     ws = sheets.get_worksheet()
     processed = set()  # используется только в DRY_RUN (в боевом режиме защита — статус в таблице)
     logger.info("Воркер запущен. Опрос таблицы каждые {} c. Ctrl+C — стоп.", POLL_INTERVAL)

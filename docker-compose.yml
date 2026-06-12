@@ -14,5 +14,7 @@ services:
       - ./browser_profile:/app/browser_profile
       # Ключ сервис-аккаунта Google (read-only внутри контейнера).
       - ./service_account.json:/app/service_account.json:ro
+      # Логи (app.log) и артефакты ошибок (скриншот+HTML) — видны на хосте для дебага.
+      - ./logs:/app/logs
     restart: unless-stopped
-    # Логи loguru идут в stdout/stderr → видны в `docker compose logs`.
+    # Логи loguru идут и в stdout/stderr (docker compose logs), и в файл ./logs/app.log.
