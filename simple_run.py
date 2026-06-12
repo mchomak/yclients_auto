@@ -201,13 +201,24 @@ def login(page) -> bool:
         _debug_dump(page, "login_captcha")
         return False
 
-    # Поле логина: email / телефон / текст (берём первое видимое не-password).
+    # Поле логина в форме signin — внутри Vue web-components (shadow DOM), причём в
+    # light-DOM висит скрытая копия Email (display:none). Локаторы Playwright пробивают
+    # shadow DOM, поэтому перебираем ВСЕ <input> и берём первое ВИДИМОЕ не-password
+    # (а не .first — первым часто оказывается скрытая копия).
     login_box = None
-    for sel in ('input[type="email"]', 'input[name="login"]', 'input[type="tel"]', 'input[type="text"]'):
-        loc = page.locator(sel)
-        if loc.count() and loc.first.is_visible():
-            login_box = loc.first
-            break
+    inputs = page.locator("input")
+    for i in range(inputs.count()):
+        cand = inputs.nth(i)
+        try:
+            itype = (cand.get_attribute("type") or "text").lower()
+            if itype in ("password", "hidden", "checkbox", "radio", "submit", "button"):
+                continue
+            if cand.is_visible():
+                login_box = cand
+                logger.info("Поле логина: type={}, label={}", itype, cand.get_attribute("label"))
+                break
+        except Exception:
+            continue
     if login_box is None:
         logger.error("Поле логина не найдено на форме входа.")
         _debug_dump(page, "login_no_login_field")
