@@ -37,7 +37,7 @@ DEBUG_DIR = PROFILE_DIR / "_debug"
 load_dotenv(ROOT / ".env")
 BASE_URL = os.getenv("BASE_URL", "https://yclients.com").rstrip("/")
 SALON_ID = os.getenv("SALON_ID", "1971030")
-TEST_NAME = os.getenv("TEST_NAME", "Клиент Тест")
+TEST_NAME = os.getenv("TEST_NAME", "Клиент Тест1111")
 TEST_PHONE = os.getenv("TEST_PHONE", "")
 TEST_PUSH_TEXT = os.getenv("TEST_PUSH_TEXT", "Тест системы пушей")
 HEADLESS = os.getenv("HEADLESS", "false").lower() in ("1", "true", "yes")
@@ -47,6 +47,11 @@ YCLIENTS_LOGIN = os.getenv("YCLIENTS_LOGIN", "").strip()
 YCLIENTS_PASSWORD = os.getenv("YCLIENTS_PASSWORD", "")
 YCLIENTS_REQUIRED_ACCOUNT_TEXT = os.getenv("YCLIENTS_REQUIRED_ACCOUNT_TEXT", "").strip()
 YCLIENTS_FORBIDDEN_ACCOUNT_TEXT = os.getenv("YCLIENTS_FORBIDDEN_ACCOUNT_TEXT", "").strip()
+# Замедление для наблюдения за видимым прогоном (0 = выкл, на сервере не трогаем).
+# SLOW_MO_MS — задержка Playwright перед каждым действием; STEP_PAUSE_MS — явные
+# паузы на ключевых шагах, чтобы успеть рассмотреть экран.
+SLOW_MO_MS = int(os.getenv("SLOW_MO_MS", "0"))
+STEP_PAUSE_MS = int(os.getenv("STEP_PAUSE_MS", "0"))
 
 BASE_PAGE_URL = f"{BASE_URL}/clients/{SALON_ID}/base/"
 
@@ -83,6 +88,12 @@ def _debug_dump(page, tag: str):
         logger.debug("DEBUG дамп сохранён: {} ; {}", png, html)
     except Exception as e:
         logger.debug("DEBUG не удалось сохранить дамп ({}): {}", tag, e)
+
+
+def _watch_pause(page):
+    """Пауза для наблюдения (только если STEP_PAUSE_MS>0) — даёт рассмотреть экран."""
+    if STEP_PAUSE_MS > 0:
+        page.wait_for_timeout(STEP_PAUSE_MS)
 
 
 def describe_page(page) -> str:
@@ -371,50 +382,58 @@ def set_consents_and_save(page):
 
     any_found = False
     for text, locator in CONSENTS:
-        sel = f'[data-locator="{locator}"]'
+        box = card.locator(f'[data-locator="{locator}"]')
         try:
-            page.locator(sel).first.wait_for(state="attached", timeout=8000)
+            box.wait_for(state="attached", timeout=8000)
         except PWTimeout:
             logger.warning("  чекбокс согласия не найден в DOM — пропускаю: {}", text)
             continue
-        res = page.evaluate(
-            """(sel) => {
-                const els = Array.from(document.querySelectorAll(sel));
-                // предпочесть чекбокс внутри показанной модалки, иначе первый в DOM
-                const el = els.find(e => {
-                    const m = e.closest('.modal');
-                    return m && getComputedStyle(m).display !== 'none';
-                }) || els[0];
-                if (!el) return {found: false, total: els.length};
-                const before = el.checked;
-                if (!el.checked) {
-                    el.checked = true;
-                    el.dispatchEvent(new Event('input',  {bubbles: true}));
-                    el.dispatchEvent(new Event('change', {bubbles: true}));
-                }
-                const vis = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-                return {found: true, total: els.length, before, after: el.checked, visible: vis};
-            }""", sel)
-        logger.debug("DEBUG чекбокс {}: {}", locator, res)
-        if not res.get("found"):
-            logger.warning("  чекбокс согласия не найден в DOM — пропускаю: {}", text)
-            continue
         any_found = True
-        if res.get("before"):
-            logger.info("  согласие уже стояло: {}", text)
-        else:
-            logger.success("  согласие проставлено: {}", text)
+        try:
+            box.scroll_into_view_if_needed()
+            _watch_pause(page)
+            if box.is_checked():
+                logger.info("  согласие уже стояло: {}", text)
+                continue
+            # Настоящий клик (не JS-.checked) — галочка появляется визуально и
+            # корректно регистрируется формой. Сам input может быть перекрыт стилями —
+            # тогда кликаем по обёртке-label.
+            try:
+                box.check(timeout=4000)
+            except PWTimeout:
+                box.locator("xpath=ancestor::label[1]").first.click(timeout=4000)
+            if box.is_checked():
+                logger.success("  согласие проставлено: {}", text)
+            else:
+                logger.warning("  не удалось отметить согласие: {}", text)
+        except Exception as e:
+            logger.warning("  ошибка при отметке согласия ({}): {}", text, e)
 
     if not any_found:
         # На этом аккаунте/салоне блока согласий в карточке нет — это штатно, не дампим
         # (иначе скриншот+HTML писались бы на каждую строку и забивали диск).
         logger.warning("Согласий в карточке нет — шаг пропущен, иду дальше.")
         return
-    try:
-        card.locator("button.card_save").click(timeout=5000)
-    except PWTimeout:
+
+    _watch_pause(page)
+    # Кнопка «Сохранить» в футере карточки — внизу, нужно проскроллить. Класс
+    # card_save есть не везде, поэтому ищем по роли/тексту.
+    save = card.get_by_role("button", name="Сохранить", exact=True)
+    if save.count() == 0:
+        save = card.locator("button.card_save")
+    if save.count() == 0:
+        save = card.get_by_text("Сохранить", exact=True)
+    if save.count() == 0:
         logger.warning("Кнопка «Сохранить» в карточке не найдена — пропускаю сохранение.")
         _debug_dump(page, "card_save_not_found")
+        return
+    try:
+        save.first.scroll_into_view_if_needed()
+        _watch_pause(page)
+        save.first.click(timeout=8000)
+    except Exception as e:
+        logger.warning("Не удалось нажать «Сохранить»: {}", e)
+        _debug_dump(page, "card_save_click_failed")
         return
     # Карточка-модалка должна закрыться после сохранения. Если не закрыть её,
     # следующий шаг (клик по чекбоксу строки в базе) падает по таймауту.
@@ -522,6 +541,7 @@ def launch_context(p):
     context = p.chromium.launch_persistent_context(
         user_data_dir=str(PROFILE_DIR),
         headless=HEADLESS,
+        slow_mo=SLOW_MO_MS,  # задержка перед каждым действием (для наблюдения)
         viewport={"width": 1440, "height": 900},
         locale="ru-RU",
         # В Docker /dev/shm по умолчанию 64MB — тяжёлые SPA (signin, ERP) исчерпывают
@@ -542,9 +562,11 @@ def process_one(page, name: str, phone: str, text: str):
     if not client_exists(page, phone):
         create_client(page, name, phone)
         open_card(page, name, phone)
+        _watch_pause(page)  # дать рассмотреть открытую карточку до согласий
         set_consents_and_save(page)
     else:
         logger.info("Клиент уже есть — пропускаю создание (защита от дублей).")
+    _watch_pause(page)
     send_push(page, phone, text)
 
 
