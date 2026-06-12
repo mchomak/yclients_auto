@@ -406,8 +406,9 @@ def set_consents_and_save(page):
             logger.success("  согласие проставлено: {}", text)
 
     if not any_found:
+        # На этом аккаунте/салоне блока согласий в карточке нет — это штатно, не дампим
+        # (иначе скриншот+HTML писались бы на каждую строку и забивали диск).
         logger.warning("Согласий в карточке нет — шаг пропущен, иду дальше.")
-        _debug_dump(page, "consents_not_found")
         return
     try:
         card.locator("button.card_save").click(timeout=5000)
